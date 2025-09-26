@@ -1,4 +1,3 @@
-// lib/bodies.ts
 export type Body = {
   id: string;
   name: string;
@@ -42,16 +41,34 @@ export function makeCircularBodies(): Body[] {
   });
 
   for (const p of PLANETS) {
-    // Place on +X axis; velocity will be seeded tangentially in physics.reset
     bodies.push({
       id: p.id,
       name: p.name,
       color: p.color,
       mass: p.mass,
-      position: [p.a, 0, 0],
-      velocity: [0, 0, 0],
+      position: [p.a, 0, 0],           // start on +X axis
+      velocity: [0, 0, 0],             // velocities will be seeded
       radius: p.visRadius
     });
   }
   return bodies;
+}
+
+/** Create/replace a zero-mass probe (test particle). */
+export function ensureProbe(
+  bodies: Body[],
+  startAt?: [number, number, number],
+  v0?: [number, number, number]
+) {
+  const i = bodies.findIndex(b => b.id === "probe");
+  const probe: Body = {
+    id: "probe",
+    name: "Probe",
+    color: "#ff2d55",
+    mass: 0, // test particle; exerts no gravity on others
+    position: startAt ? [...startAt] as [number,number,number] : [1,0,0],
+    velocity: v0 ? [...v0] as [number,number,number] : [0,0,0],
+    radius: 0.005
+  };
+  if (i >= 0) bodies[i] = probe; else bodies.push(probe);
 }

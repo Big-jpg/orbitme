@@ -1,5 +1,7 @@
-// lib/physics.ts
 import { Body, G, SOFTENING2 } from "~/lib/bodies";
+
+/** Extra per-body accelerations (e.g., thrust). Sparse and optional. */
+export type ExtraAccel = ([number, number, number] | undefined)[] | undefined;
 
 export type SimSettings = {
   integrator: "leapfrog" | "rk4";
@@ -19,6 +21,7 @@ export function cloneBodies(bodies: Body[]): Body[] {
   }));
 }
 
+/** Remove net momentum so the system doesn’t drift. */
 export function zeroSystemMomentum(bodies: Body[]): void {
   let mSum = 0, vx = 0, vy = 0, vz = 0;
   for (const b of bodies) {
@@ -54,11 +57,13 @@ export function seedCircularVelocities(bodies: Body[], sunId = "sun", clockwise 
   }
 }
 
+/** Accumulate accelerations: full N-body or Sun-only; adds optional extras (thrust) */
 function accumulateAccelerations(
   bodies: Body[],
   massScale: number,
-  centralSunOnly = true,   // default to Sun-only for rock-solid circular starts
-  sunIndex = 0
+  centralSunOnly = false,
+  sunIndex = 0,
+  extra?: ExtraAccel
 ) {
   const N = bodies.length;
   const ax = new Array(N).fill(0);
@@ -77,27 +82,35 @@ function accumulateAccelerations(
       const s1 = G * bodies[s].mass * massScale * invR3;
       ax[i] += dx * s1; ay[i] += dy * s1; az[i] += dz * s1;
     }
-    return { ax, ay, az };
-  }
-
-  for (let i = 0; i < N; i++) {
-    for (let j = i + 1; j < N; j++) {
-      const dx = bodies[j].position[0] - bodies[i].position[0];
-      const dy = bodies[j].position[1] - bodies[i].position[1];
-      const dz = bodies[j].position[2] - bodies[i].position[2];
-      const r2 = dx*dx + dy*dy + dz*dz + SOFTENING2;
-      const invR3 = 1 / (Math.sqrt(r2) * r2);
-      const f = G * invR3;
-      const s1 = f * bodies[j].mass * massScale;
-      const s2 = f * bodies[i].mass * massScale;
-      ax[i] += dx * s1; ay[i] += dy * s1; az[i] += dz * s1;
-      ax[j] -= dx * s2; ay[j] -= dy * s2; az[j] -= dz * s2;
+  } else {
+    for (let i = 0; i < N; i++) {
+      for (let j = i + 1; j < N; j++) {
+        const dx = bodies[j].position[0] - bodies[i].position[0];
+        const dy = bodies[j].position[1] - bodies[i].position[1];
+        const dz = bodies[j].position[2] - bodies[i].position[2];
+        const r2 = dx*dx + dy*dy + dz*dz + SOFTENING2;
+        const invR3 = 1 / (Math.sqrt(r2) * r2);
+        const f = G * invR3;
+        const s1 = f * bodies[j].mass * massScale;
+        const s2 = f * bodies[i].mass * massScale;
+        ax[i] += dx * s1; ay[i] += dy * s1; az[i] += dz * s1;
+        ax[j] -= dx * s2; ay[j] -= dy * s2; az[j] -= dz * s2;
+      }
     }
   }
+
+  if (extra) {
+    for (let i = 0; i < Math.min(extra.length, N); i++) {
+      const e = extra[i];
+      if (!e) continue;
+      ax[i] += e[0]; ay[i] += e[1]; az[i] += e[2];
+    }
+  }
+
   return { ax, ay, az };
 }
 
-/** Leapfrog (kick-drift-kick) — excellent energy behavior for orbital motion. */
+/** Leapfrog (kick-drift-kick): great energy behavior for orbital motion. */
 export function stepLeapfrog(
   bodies: Body[],
   dt: number,
@@ -105,28 +118,29 @@ export function stepLeapfrog(
   massScale: number,
   velScale: number,
   centralSunOnly = true,
-  sunIndex = 0
+  sunIndex = 0,
+  extra?: ExtraAccel
 ) {
   const h = dt * timeScale;
   const N = bodies.length;
 
-  // Kick #1 (half step)
-  const { ax, ay, az } = accumulateAccelerations(bodies, massScale, centralSunOnly, sunIndex);
+  // Kick #1
+  const { ax, ay, az } = accumulateAccelerations(bodies, massScale, centralSunOnly, sunIndex, extra);
   for (let i = 0; i < N; i++) {
     bodies[i].velocity[0] += ax[i] * (h * 0.5);
     bodies[i].velocity[1] += ay[i] * (h * 0.5);
     bodies[i].velocity[2] += az[i] * (h * 0.5);
   }
 
-  // Drift (full step)
+  // Drift
   for (let i = 0; i < N; i++) {
     bodies[i].position[0] += bodies[i].velocity[0] * h;
     bodies[i].position[1] += bodies[i].velocity[1] * h;
     bodies[i].position[2] += bodies[i].velocity[2] * h;
   }
 
-  // Kick #2 (half step) using accelerations at new positions
-  const { ax: ax2, ay: ay2, az: az2 } = accumulateAccelerations(bodies, massScale, centralSunOnly, sunIndex);
+  // Kick #2
+  const { ax: ax2, ay: ay2, az: az2 } = accumulateAccelerations(bodies, massScale, centralSunOnly, sunIndex, extra);
   for (let i = 0; i < N; i++) {
     bodies[i].velocity[0] = (bodies[i].velocity[0] + ax2[i] * (h * 0.5)) * velScale;
     bodies[i].velocity[1] = (bodies[i].velocity[1] + ay2[i] * (h * 0.5)) * velScale;
@@ -134,7 +148,7 @@ export function stepLeapfrog(
   }
 }
 
-/** Symmetric RK4 (kept for comparison / when you disable Sun-only). */
+/** Symmetric RK4, with optional Sun-only mode and extras. */
 export function stepRK4(
   bodies: Body[],
   dt: number,
@@ -142,7 +156,8 @@ export function stepRK4(
   massScale: number,
   velScale: number,
   centralSunOnly = false,
-  sunIndex = 0
+  sunIndex = 0,
+  extra?: ExtraAccel
 ) {
   const h = dt * timeScale;
   const N = bodies.length;
@@ -152,7 +167,7 @@ export function stepRK4(
 
   function computeAccel(pos: [number, number, number][]): [number, number, number][] {
     for (let i = 0; i < N; i++) bodies[i].position = [pos[i][0], pos[i][1], pos[i][2]];
-    const { ax, ay, az } = accumulateAccelerations(bodies, massScale, centralSunOnly, sunIndex);
+    const { ax, ay, az } = accumulateAccelerations(bodies, massScale, centralSunOnly, sunIndex, extra);
     return ax.map((_, i) => [ax[i], ay[i], az[i]] as [number, number, number]);
   }
 
