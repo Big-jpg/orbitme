@@ -10,7 +10,7 @@ export type Body = {
 
 export const G = 0.00029591220828559104;       // AU^3 / (Msun * day^2)
 // Slightly larger softening for extra stability at high dt
-export const SOFTENING2 = 1e-5;
+export const SOFTENING2 = 1e-9; // (AU)^2 — tiny Plummer softening to avoid singularities at r→0
 
 type PlanetCfg = {
   id: string; name: string; color: string; mass: number; a: number; visRadius: number;

@@ -1,47 +1,24 @@
 import { Body, G, SOFTENING2 } from "~/lib/bodies";
 
-/** Extra per-body accelerations (e.g., thrust). Sparse and optional. */
-export type ExtraAccel = ([number, number, number] | undefined)[] | undefined;
-
-/** Unit conversions */
-export const AU_PER_DAY_IN_M_PER_S = 1.495978707e11 / 86400; // ≈ 1.731456e6 m/s
-export const M_PER_S_TO_AU_PER_DAY = 1 / AU_PER_DAY_IN_M_PER_S;
-
 export type SimSettings = {
   integrator: "leapfrog" | "rk4";
   timeScale: number; // multiplier on dt
   dt: number;        // days per tick before timescale
   massScale: number; // global mass multiplier
-  velScale: number;  // global velocity multiplier
+  velScale: number;  // global velocity multiplier (keep ~1.0 for physical runs)
   running: boolean;
   trails: boolean;
 };
 
+// Handy: deep clone of position/velocity arrays
 export function cloneBodies(bodies: Body[]): Body[] {
-  return bodies.map(b => ({
-    ...b,
-    position: [...b.position] as [number, number, number],
-    velocity: [...b.velocity] as [number, number, number],
-  }));
+  return bodies.map(b => ({ ...b, position: [...b.position] as any, velocity: [...b.velocity] as any }));
 }
 
-/** Remove net momentum so the system doesn’t drift. */
-export function zeroSystemMomentum(bodies: Body[]): void {
-  let mSum = 0, vx = 0, vy = 0, vz = 0;
-  for (const b of bodies) {
-    mSum += b.mass;
-    vx += b.mass * b.velocity[0];
-    vy += b.mass * b.velocity[1];
-    vz += b.mass * b.velocity[2];
-  }
-  if (mSum === 0) return;
-  vx /= mSum; vy /= mSum; vz /= mSum;
-  for (const b of bodies) {
-    b.velocity = [b.velocity[0] - vx, b.velocity[1] - vy, b.velocity[2] - vz];
-  }
-}
-
-/** Seed circular tangential velocities (XY plane) around the Sun. */
+/**
+ * Seed simple circular velocities in the ecliptic (XY) plane around the Sun.
+ * This is a convenience used by setup/reset code.
+ */
 export function seedCircularVelocities(bodies: Body[], sunId = "sun", clockwise = false): void {
   const sun = bodies.find(b => b.id === sunId);
   if (!sun) return;
@@ -52,153 +29,215 @@ export function seedCircularVelocities(bodies: Body[], sunId = "sun", clockwise 
     const rz = b.position[2] - sun.position[2];
     const r = Math.hypot(rx, ry, rz);
     if (r === 0) continue;
-    const vmag = Math.sqrt(G * sun.mass / r); // circular vis-viva (sun-dominant)
-    let tx = -ry, ty = rx, tz = 0;            // tangent in XY: k × r
-    const tlen = Math.hypot(tx, ty, tz) || 1;
+    const vmag = Math.sqrt(G * sun.mass / r); // in AU/day
+    // tangent in XY plane (k × r)
+    let tx = -ry, ty = rx, tz = 0;
+    let tlen = Math.hypot(tx, ty, tz);
+    if (tlen === 0) { tx = 0; ty = -rz; tz = ry; tlen = Math.hypot(tx, ty, tz); }
     tx /= tlen; ty /= tlen; tz /= tlen;
     const s = clockwise ? -1 : 1;
     b.velocity = [tx * vmag * s, ty * vmag * s, tz * vmag * s];
   }
 }
 
-/** Accumulate accelerations: full N-body or Sun-only; adds optional extras (thrust). */
-function accumulateAccelerations(
-  bodies: Body[],
-  massScale: number,
-  centralSunOnly = false,
-  sunIndex = 0,
-  extra?: ExtraAccel
-) {
-  const N = bodies.length;
-  const ax = new Array(N).fill(0);
-  const ay = new Array(N).fill(0);
-  const az = new Array(N).fill(0);
-
-  if (centralSunOnly) {
-    const s = sunIndex;
-    for (let i = 0; i < N; i++) {
-      if (i === s) continue;
-      const dx = bodies[s].position[0] - bodies[i].position[0];
-      const dy = bodies[s].position[1] - bodies[i].position[1];
-      const dz = bodies[s].position[2] - bodies[i].position[2];
-      const r2 = dx*dx + dy*dy + dz*dz + SOFTENING2;
-      const invR3 = 1 / (Math.sqrt(r2) * r2);
-      const s1 = G * bodies[s].mass * massScale * invR3;
-      ax[i] += dx * s1; ay[i] += dy * s1; az[i] += dz * s1;
-    }
-  } else {
-    for (let i = 0; i < N; i++) {
-      for (let j = i + 1; j < N; j++) {
-        const dx = bodies[j].position[0] - bodies[i].position[0];
-        const dy = bodies[j].position[1] - bodies[i].position[1];
-        const dz = bodies[j].position[2] - bodies[i].position[2];
-        const r2 = dx*dx + dy*dy + dz*dz + SOFTENING2;
-        const invR3 = 1 / (Math.sqrt(r2) * r2);
-        const f = G * invR3;
-        const s1 = f * bodies[j].mass * massScale;
-        const s2 = f * bodies[i].mass * massScale;
-        ax[i] += dx * s1; ay[i] += dy * s1; az[i] += dz * s1;
-        ax[j] -= dx * s2; ay[j] -= dy * s2; az[j] -= dz * s2;
-      }
-    }
-  }
-
-  if (extra) {
-    for (let i = 0; i < Math.min(extra.length, N); i++) {
-      const e = extra[i];
-      if (!e) continue;
-      ax[i] += e[0]; ay[i] += e[1]; az[i] += e[2];
-    }
-  }
-
-  return { ax, ay, az };
+/** Zero out linear momentum of whole system (recenters barycenter’s velocity). */
+export function zeroSystemMomentum(bodies: Body[]) {
+  let px = 0, py = 0, pz = 0, msum = 0;
+  for (const b of bodies) { px += b.velocity[0] * b.mass; py += b.velocity[1] * b.mass; pz += b.velocity[2] * b.mass; msum += b.mass; }
+  if (msum === 0) return;
+  const vx = px / msum, vy = py / msum, vz = pz / msum;
+  for (const b of bodies) { b.velocity[0] -= vx; b.velocity[1] -= vy; b.velocity[2] -= vz; }
 }
 
-/** Leapfrog (kick-drift-kick): great energy behavior for orbital motion. */
+/** Optional extra accelerations hook (e.g., thrust). */
+export type ExtraAccel = ((bodies: Body[]) => ([number, number, number][])) | undefined;
+
+/** Compute accelerations for all bodies (O(N^2)). */
+function computeAccelerations(
+  bodies: Body[],
+  massScale: number
+): [Float64Array, Float64Array, Float64Array] {
+  const N = bodies.length;
+  const ax = new Float64Array(N);
+  const ay = new Float64Array(N);
+  const az = new Float64Array(N);
+
+  for (let i = 0; i < N; i++) {
+    for (let j = i + 1; j < N; j++) {
+      const dx = bodies[j].position[0] - bodies[i].position[0];
+      const dy = bodies[j].position[1] - bodies[i].position[1];
+      const dz = bodies[j].position[2] - bodies[i].position[2];
+
+      const r2 = dx*dx + dy*dy + dz*dz + SOFTENING2;
+      const invR = 1.0 / Math.sqrt(r2);
+      const invR3 = invR / r2;
+
+      // acceleration magnitude factor
+      const f = G * invR3;
+      const s1 = f * bodies[j].mass * massScale;
+      const s2 = f * bodies[i].mass * massScale;
+
+      ax[i] += dx * s1; ay[i] += dy * s1; az[i] += dz * s1;
+      ax[j] -= dx * s2; ay[j] -= dy * s2; az[j] -= dz * s2;
+    }
+  }
+  return [ax, ay, az];
+}
+
+/**
+ * Velocity–Verlet (leapfrog) with automatic substepping.
+ * - Stable and time-reversible for conservative forces.
+ * - Substeps ensure each micro-step stays below hMax (default 0.05 day).
+ *
+ * Notes on velScale:
+ *   For physically meaningful runs keep velScale ~ 1.0. If you do change it,
+ *   we treat it as stretching the DRIFT only (x update), not the KICK (v update),
+ *   which is less destabilizing than scaling both.
+ */
 export function stepLeapfrog(
   bodies: Body[],
   dt: number,
   timeScale: number,
   massScale: number,
   velScale: number,
-  centralSunOnly = true,
-  sunIndex = 0,
-  extra?: ExtraAccel
+  _centralSunOnly = false,
+  _sunIndex = 0,
+  extra?: ExtraAccel,
+  hMax = 0.05  // max substep in days  (~1.2 hours)
 ) {
-  const h = dt * timeScale;
-  const N = bodies.length;
+  let H = Math.max(0, dt * timeScale);      // total step for this frame (days)
+  if (H === 0) return;
 
-  // Kick #1
-  const { ax, ay, az } = accumulateAccelerations(bodies, massScale, centralSunOnly, sunIndex, extra);
-  for (let i = 0; i < N; i++) {
-    bodies[i].velocity[0] += ax[i] * (h * 0.5);
-    bodies[i].velocity[1] += ay[i] * (h * 0.5);
-    bodies[i].velocity[2] += az[i] * (h * 0.5);
-  }
+  // number of substeps to keep each micro-step ≤ hMax
+  const n = Math.max(1, Math.ceil(H / hMax));
+  const h = H / n;
+  const driftH = h * Math.max(0.0001, velScale); // only affect the drift
 
-  // Drift
-  for (let i = 0; i < N; i++) {
-    bodies[i].position[0] += bodies[i].velocity[0] * h;
-    bodies[i].position[1] += bodies[i].velocity[1] * h;
-    bodies[i].position[2] += bodies[i].velocity[2] * h;
-  }
+  for (let s = 0; s < n; s++) {
+    // a(t)
+    const [ax, ay, az] = computeAccelerations(bodies, massScale);
+    // External/extra accelerations if provided
+    if (extra) {
+      const add = extra(bodies);
+      for (let i = 0; i < bodies.length; i++) {
+        ax[i] += add[i][0];
+        ay[i] += add[i][1];
+        az[i] += add[i][2];
+      }
+    }
 
-  // Kick #2
-  const { ax: ax2, ay: ay2, az: az2 } = accumulateAccelerations(bodies, massScale, centralSunOnly, sunIndex, extra);
-  for (let i = 0; i < N; i++) {
-    bodies[i].velocity[0] = (bodies[i].velocity[0] + ax2[i] * (h * 0.5)) * velScale;
-    bodies[i].velocity[1] = (bodies[i].velocity[1] + ay2[i] * (h * 0.5)) * velScale;
-    bodies[i].velocity[2] = (bodies[i].velocity[2] + az2[i] * (h * 0.5)) * velScale;
+    // KICK (half): v(t+½h) = v(t) + a(t)*½h
+    for (let i = 0; i < bodies.length; i++) {
+      bodies[i].velocity[0] += ax[i] * (0.5 * h);
+      bodies[i].velocity[1] += ay[i] * (0.5 * h);
+      bodies[i].velocity[2] += az[i] * (0.5 * h);
+    }
+
+    // DRIFT: x(t+h) = x(t) + v(t+½h)*h   (apply velScale only to drift)
+    for (let i = 0; i < bodies.length; i++) {
+      bodies[i].position[0] += bodies[i].velocity[0] * driftH;
+      bodies[i].position[1] += bodies[i].velocity[1] * driftH;
+      bodies[i].position[2] += bodies[i].velocity[2] * driftH;
+    }
+
+    // a(t+h)
+    const [ax2, ay2, az2] = computeAccelerations(bodies, massScale);
+    if (extra) {
+      const add2 = extra(bodies);
+      for (let i = 0; i < bodies.length; i++) {
+        ax2[i] += add2[i][0];
+        ay2[i] += add2[i][1];
+        az2[i] += add2[i][2];
+      }
+    }
+
+    // KICK (half): v(t+h) = v(t+½h) + a(t+h)*½h
+    for (let i = 0; i < bodies.length; i++) {
+      bodies[i].velocity[0] += ax2[i] * (0.5 * h);
+      bodies[i].velocity[1] += ay2[i] * (0.5 * h);
+      bodies[i].velocity[2] += az2[i] * (0.5 * h);
+    }
   }
 }
 
-/** Symmetric RK4, with optional Sun-only mode and extras. */
+/** Classic RK4 with the same substep guard for parity/testing. */
 export function stepRK4(
   bodies: Body[],
   dt: number,
   timeScale: number,
   massScale: number,
   velScale: number,
-  centralSunOnly = false,
-  sunIndex = 0,
-  extra?: ExtraAccel
+  _centralSunOnly = false,
+  _sunIndex = 0,
+  extra?: ExtraAccel,
+  hMax = 0.05
 ) {
-  const h = dt * timeScale;
+  let H = Math.max(0, dt * timeScale);
+  if (H === 0) return;
+  const n = Math.max(1, Math.ceil(H / hMax));
+  const h = H / n;
+  const driftH = h * Math.max(0.0001, velScale);
+
   const N = bodies.length;
 
-  const x = bodies.map(b => [...b.position] as [number, number, number]);
-  const v = bodies.map(b => [...b.velocity] as [number, number, number]);
-
-  function computeAccel(pos: [number, number, number][]): [number, number, number][] {
-    for (let i = 0; i < N; i++) bodies[i].position = [pos[i][0], pos[i][1], pos[i][2]];
-    const { ax, ay, az } = accumulateAccelerations(bodies, massScale, centralSunOnly, sunIndex, extra);
-    return ax.map((_, i) => [ax[i], ay[i], az[i]] as [number, number, number]);
+  function accelAt(pos: number[][]): [number, number, number][] {
+    const ax = Array(N).fill(0).map(() => [0,0,0] as [number,number,number]);
+    for (let i = 0; i < N; i++) {
+      for (let j = i + 1; j < N; j++) {
+        const dx = pos[j][0] - pos[i][0];
+        const dy = pos[j][1] - pos[i][1];
+        const dz = pos[j][2] - pos[i][2];
+        const r2 = dx*dx + dy*dy + dz*dz + SOFTENING2;
+        const invR = 1/Math.sqrt(r2);
+        const invR3 = invR / r2;
+        const f = G * invR3;
+        const s1 = f * bodies[j].mass * massScale;
+        const s2 = f * bodies[i].mass * massScale;
+        ax[i][0] += dx*s1; ax[i][1] += dy*s1; ax[i][2] += dz*s1;
+        ax[j][0] -= dx*s2; ax[j][1] -= dy*s2; ax[j][2] -= dz*s2;
+      }
+    }
+    if (extra) {
+      const add = extra(bodies);
+      for (let i = 0; i < N; i++) {
+        ax[i][0] += add[i][0]; ax[i][1] += add[i][1]; ax[i][2] += add[i][2];
+      }
+    }
+    return ax;
   }
 
-  const a1 = computeAccel(x);
+  for (let s = 0; s < n; s++) {
+    const x = bodies.map(b => [...b.position] as [number,number,number]);
+    const v = bodies.map(b => [...b.velocity] as [number,number,number]);
 
-  const x2 = x.map((xi, i) => [xi[0] + 0.5 * h * v[i][0], xi[1] + 0.5 * h * v[i][1], xi[2] + 0.5 * h * v[i][2]] as [number, number, number]);
-  const v2 = v.map((vi, i) => [vi[0] + 0.5 * h * a1[i][0], vi[1] + 0.5 * h * a1[i][1], vi[2] + 0.5 * h * a1[i][2]] as [number, number, number]);
-  const a2 = computeAccel(x2);
+    const a1 = accelAt(x);
 
-  const x3 = x.map((xi, i) => [xi[0] + 0.5 * h * v2[i][0], xi[1] + 0.5 * h * v2[i][1], xi[2] + 0.5 * h * v2[i][2]] as [number, number, number]);
-  const v3 = v.map((vi, i) => [vi[0] + 0.5 * h * a2[i][0], vi[1] + 0.5 * h * a2[i][1], vi[2] + 0.5 * h * a2[i][2]] as [number, number, number]);
-  const a3 = computeAccel(x3);
+    const x2 = x.map((xi,i)=>[xi[0]+0.5*driftH*v[i][0], xi[1]+0.5*driftH*v[i][1], xi[2]+0.5*driftH*v[i][2]]);
+    const v2 = v.map((vi,i)=>[vi[0]+0.5*h*a1[i][0], vi[1]+0.5*h*a1[i][1], vi[2]+0.5*h*a1[i][2]]);
+    const a2 = accelAt(x2);
 
-  const x4 = x.map((xi, i) => [xi[0] + h * v3[i][0], xi[1] + h * v3[i][1], xi[2] + h * v3[i][2]] as [number, number, number]);
-  const v4 = v.map((vi, i) => [vi[0] + h * a3[i][0], vi[1] + h * a3[i][1], vi[2] + h * a3[i][2]] as [number, number, number]);
-  const a4 = computeAccel(x4);
+    const x3 = x.map((xi,i)=>[xi[0]+0.5*driftH*v2[i][0], xi[1]+0.5*driftH*v2[i][1], xi[2]+0.5*driftH*v2[i][2]]);
+    const v3 = v.map((vi,i)=>[vi[0]+0.5*h*a2[i][0], vi[1]+0.5*h*a2[i][1], vi[2]+0.5*h*a2[i][2]]);
+    const a3 = accelAt(x3);
 
-  for (let i = 0; i < N; i++) {
-    bodies[i].position = [
-      x[i][0] + (h / 6) * (v[i][0] + 2 * v2[i][0] + 2 * v3[i][0] + v4[i][0]),
-      x[i][1] + (h / 6) * (v[i][1] + 2 * v2[i][1] + 2 * v3[i][1] + v4[i][1]),
-      x[i][2] + (h / 6) * (v[i][2] + 2 * v2[i][2] + 2 * v3[i][2] + v4[i][2]),
-    ];
-    bodies[i].velocity = [
-      v[i][0] + (h / 6) * (a1[i][0] + 2 * a2[i][0] + 2 * a3[i][0] + a4[i][0]),
-      v[i][1] + (h / 6) * (a1[i][1] + 2 * a2[i][1] + 2 * a3[i][1] + a4[i][1]),
-      v[i][2] + (h / 6) * (a1[i][2] + 2 * a2[i][2] + 2 * a3[i][2] + a4[i][2]),
-    ].map(c => c * velScale) as [number, number, number];
+    const x4 = x.map((xi,i)=>[xi[0]+driftH*v3[i][0], xi[1]+driftH*v3[i][1], xi[2]+driftH*v3[i][2]]);
+    const v4 = v.map((vi,i)=>[vi[0]+h*a3[i][0], vi[1]+h*a3[i][1], vi[2]+h*a3[i][2]]);
+    const a4 = accelAt(x4);
+
+    for (let i = 0; i < N; i++) {
+      bodies[i].position = [
+        x[i][0] + (driftH/6) * (v[i][0] + 2*v2[i][0] + 2*v3[i][0] + v4[i][0]),
+        x[i][1] + (driftH/6) * (v[i][1] + 2*v2[i][1] + 2*v3[i][1] + v4[i][1]),
+        x[i][2] + (driftH/6) * (v[i][2] + 2*v2[i][2] + 2*v3[i][2] + v4[i][2]),
+      ];
+      bodies[i].velocity = [
+        v[i][0] + (h/6) * (a1[i][0] + 2*a2[i][0] + 2*a3[i][0] + a4[i][0]),
+        v[i][1] + (h/6) * (a1[i][1] + 2*a2[i][1] + 2*a3[i][1] + a4[i][1]),
+        v[i][2] + (h/6) * (a1[i][2] + 2*a2[i][2] + 2*a3[i][2] + a4[i][2]),
+      ];
+    }
   }
 }
+
+/** Unit helper if you want to convert DV sliders, etc. */
+export const M_PER_S_TO_AU_PER_DAY = 1 / (149597870700 /* m/AU */) * (86400 /* s/day */);
