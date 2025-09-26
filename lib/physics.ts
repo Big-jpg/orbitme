@@ -61,76 +61,144 @@ function accelFor(bodies: Body[], i: number, massScale: number): [number, number
 
 export function stepSymplecticEuler(bodies: Body[], dt: number, timeScale: number, massScale: number, velScale: number) {
   const h = dt * timeScale;
-  // v_{t+1} = v_t + a(x_t)*h ; x_{t+1} = x_t + v_{t+1}*h
-  for (let i = 0; i < bodies.length; i++) {
-    const b = bodies[i];
-    const a = accelFor(bodies, i, massScale);
-    b.velocity[0] += a[0] * h;
-    b.velocity[1] += a[1] * h;
-    b.velocity[2] += a[2] * h;
-    // velocity scaling knob
-    b.velocity[0] *= velScale;
-    b.velocity[1] *= velScale;
-    b.velocity[2] *= velScale;
-  }
-  for (let i = 0; i < bodies.length; i++) {
-    const b = bodies[i];
-    b.position[0] += bodies[i].velocity[0] * h;
-    b.position[1] += bodies[i].velocity[1] * h;
-    b.position[2] += bodies[i].velocity[2] * h;
-  }
-}
-
-export function stepRK4(bodies: Body[], dt: number, timeScale: number, massScale: number, velScale: number) {
-  // Classical RK4 on state (x,v). For simplicity, treat velocity scaling as a post-step damping.
-  const h = dt * timeScale;
-
   const N = bodies.length;
-  const x0 = bodies.map(b => [...b.position] as [number, number, number]);
-  const v0 = bodies.map(b => [...b.velocity] as [number, number, number]);
 
-  const a = (x: [number, number, number][]) => {
-    // temporarily assign positions to bodies to reuse accelFor
-    for (let i = 0; i < N; i++) bodies[i].position = [...x[i]];
-    return Array.from({ length: N }, (_, i) => accelFor(bodies, i, massScale));
-  };
+  // Allocate accelerations
+  const ax = new Array(N).fill(0);
+  const ay = new Array(N).fill(0);
+  const az = new Array(N).fill(0);
 
-  const add = (A: [number, number, number][], B: [number, number, number][], s: number) =>
-    A.map((v, i) => [v[0] + B[i][0] * s, v[1] + B[i][1] * s, v[2] + B[i][2] * s] as [number, number, number]);
-
-  const k1x = v0;
-  const k1v = a(x0);
-
-  const k2x = add(v0, k1v, h / 2);
-  const k2v = a(add(x0, k1x, h / 2));
-
-  const k3x = add(v0, k2v, h / 2);
-  const k3v = a(add(x0, k2x, h / 2));
-
-  const k4x = add(v0, k3v, h);
-  const k4v = a(add(x0, k3x, h));
-
+  // Pairwise forces (symmetric)
   for (let i = 0; i < N; i++) {
-    const xi = x0[i];
-    const vi = v0[i];
-    const dx = [
-      (k1x[i][0] + 2 * k2x[i][0] + 2 * k3x[i][0] + k4x[i][0]) * (h / 6),
-      (k1x[i][1] + 2 * k2x[i][1] + 2 * k3x[i][1] + k4x[i][1]) * (h / 6),
-      (k1x[i][2] + 2 * k2x[i][2] + 2 * k3x[i][2] + k4x[i][2]) * (h / 6)
-    ] as [number, number, number];
+    for (let j = i + 1; j < N; j++) {
+      const dx = bodies[j].position[0] - bodies[i].position[0];
+      const dy = bodies[j].position[1] - bodies[i].position[1];
+      const dz = bodies[j].position[2] - bodies[i].position[2];
 
-    const dv = [
-      (k1v[i][0] + 2 * k2v[i][0] + 2 * k3v[i][0] + k4v[i][0]) * (h / 6),
-      (k1v[i][1] + 2 * k2v[i][1] + 2 * k3v[i][1] + k4v[i][1]) * (h / 6),
-      (k1v[i][2] + 2 * k2v[i][2] + 2 * k3v[i][2] + k4v[i][2]) * (h / 6)
-    ] as [number, number, number];
+      const r2 = dx*dx + dy*dy + dz*dz + SOFTENING2;
+      const invR3 = 1.0 / (Math.sqrt(r2) * r2);
 
-    bodies[i].position = [xi[0] + dx[0], xi[1] + dx[1], xi[2] + dx[2]];
-    bodies[i].velocity = [vi[0] + dv[0], vi[1] + dv[1], vi[2] + dv[2]];
-    bodies[i].velocity = [
-      bodies[i].velocity[0] * velScale,
-      bodies[i].velocity[1] * velScale,
-      bodies[i].velocity[2] * velScale
-    ];
+      const f = G * invR3;
+
+      const s1 = f * bodies[j].mass * massScale;
+      const s2 = f * bodies[i].mass * massScale;
+
+      ax[i] += dx * s1;
+      ay[i] += dy * s1;
+      az[i] += dz * s1;
+
+      ax[j] -= dx * s2;
+      ay[j] -= dy * s2;
+      az[j] -= dz * s2;
+    }
+  }
+
+  // Update velocities
+  for (let i = 0; i < N; i++) {
+    bodies[i].velocity[0] = (bodies[i].velocity[0] + ax[i] * h) * velScale;
+    bodies[i].velocity[1] = (bodies[i].velocity[1] + ay[i] * h) * velScale;
+    bodies[i].velocity[2] = (bodies[i].velocity[2] + az[i] * h) * velScale;
+  }
+
+  // Update positions
+  for (let i = 0; i < N; i++) {
+    bodies[i].position[0] += bodies[i].velocity[0] * h;
+    bodies[i].position[1] += bodies[i].velocity[1] * h;
+    bodies[i].position[2] += bodies[i].velocity[2] * h;
   }
 }
+
+
+export function stepRK4(
+  bodies: Body[],
+  dt: number,
+  timeScale: number,
+  massScale: number,
+  velScale: number
+) {
+  const h = dt * timeScale;
+  const N = bodies.length;
+
+  // Copy state
+  const x = bodies.map(b => [...b.position] as [number, number, number]);
+  const v = bodies.map(b => [...b.velocity] as [number, number, number]);
+
+  // Helper: compute accelerations for all bodies given positions
+  function computeAccel(pos: [number, number, number][]): [number, number, number][] {
+    const ax = Array(N).fill(0).map(() => [0, 0, 0] as [number, number, number]);
+    for (let i = 0; i < N; i++) {
+      for (let j = i + 1; j < N; j++) {
+        const dx = pos[j][0] - pos[i][0];
+        const dy = pos[j][1] - pos[i][1];
+        const dz = pos[j][2] - pos[i][2];
+        const r2 = dx * dx + dy * dy + dz * dz + SOFTENING2;
+        const invR3 = 1 / (Math.sqrt(r2) * r2);
+        const f = G * invR3;
+
+        const s1 = f * bodies[j].mass * massScale;
+        const s2 = f * bodies[i].mass * massScale;
+
+        ax[i][0] += dx * s1; ax[i][1] += dy * s1; ax[i][2] += dz * s1;
+        ax[j][0] -= dx * s2; ax[j][1] -= dy * s2; ax[j][2] -= dz * s2;
+      }
+    }
+    return ax;
+  }
+
+  // k1
+  const a1 = computeAccel(x);
+
+  // k2
+  const x2 = x.map((xi, i) => [
+    xi[0] + 0.5 * h * v[i][0],
+    xi[1] + 0.5 * h * v[i][1],
+    xi[2] + 0.5 * h * v[i][2],
+  ] as [number, number, number]);
+  const v2 = v.map((vi, i) => [
+    vi[0] + 0.5 * h * a1[i][0],
+    vi[1] + 0.5 * h * a1[i][1],
+    vi[2] + 0.5 * h * a1[i][2],
+  ] as [number, number, number]);
+  const a2 = computeAccel(x2);
+
+  // k3
+  const x3 = x.map((xi, i) => [
+    xi[0] + 0.5 * h * v2[i][0],
+    xi[1] + 0.5 * h * v2[i][1],
+    xi[2] + 0.5 * h * v2[i][2],
+  ] as [number, number, number]);
+  const v3 = v.map((vi, i) => [
+    vi[0] + 0.5 * h * a2[i][0],
+    vi[1] + 0.5 * h * a2[i][1],
+    vi[2] + 0.5 * h * a2[i][2],
+  ] as [number, number, number]);
+  const a3 = computeAccel(x3);
+
+  // k4
+  const x4 = x.map((xi, i) => [
+    xi[0] + h * v3[i][0],
+    xi[1] + h * v3[i][1],
+    xi[2] + h * v3[i][2],
+  ] as [number, number, number]);
+  const v4 = v.map((vi, i) => [
+    vi[0] + h * a3[i][0],
+    vi[1] + h * a3[i][1],
+    vi[2] + h * a3[i][2],
+  ] as [number, number, number]);
+  const a4 = computeAccel(x4);
+
+  // Combine RK4 increments
+  for (let i = 0; i < N; i++) {
+    bodies[i].position = [
+      x[i][0] + (h / 6) * (v[i][0] + 2 * v2[i][0] + 2 * v3[i][0] + v4[i][0]),
+      x[i][1] + (h / 6) * (v[i][1] + 2 * v2[i][1] + 2 * v3[i][1] + v4[i][1]),
+      x[i][2] + (h / 6) * (v[i][2] + 2 * v2[i][2] + 2 * v3[i][2] + v4[i][2]),
+    ];
+    bodies[i].velocity = [
+      v[i][0] + (h / 6) * (a1[i][0] + 2 * a2[i][0] + 2 * a3[i][0] + a4[i][0]),
+      v[i][1] + (h / 6) * (a1[i][1] + 2 * a2[i][1] + 2 * a3[i][1] + a4[i][1]),
+      v[i][2] + (h / 6) * (a1[i][2] + 2 * a2[i][2] + 2 * a3[i][2] + a4[i][2]),
+    ].map(c => c * velScale) as [number, number, number];
+  }
+}
+
