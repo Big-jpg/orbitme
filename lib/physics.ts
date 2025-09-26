@@ -3,6 +3,10 @@ import { Body, G, SOFTENING2 } from "~/lib/bodies";
 /** Extra per-body accelerations (e.g., thrust). Sparse and optional. */
 export type ExtraAccel = ([number, number, number] | undefined)[] | undefined;
 
+/** Unit conversions */
+export const AU_PER_DAY_IN_M_PER_S = 1.495978707e11 / 86400; // ≈ 1.731456e6 m/s
+export const M_PER_S_TO_AU_PER_DAY = 1 / AU_PER_DAY_IN_M_PER_S;
+
 export type SimSettings = {
   integrator: "leapfrog" | "rk4";
   timeScale: number; // multiplier on dt
@@ -57,7 +61,7 @@ export function seedCircularVelocities(bodies: Body[], sunId = "sun", clockwise 
   }
 }
 
-/** Accumulate accelerations: full N-body or Sun-only; adds optional extras (thrust) */
+/** Accumulate accelerations: full N-body or Sun-only; adds optional extras (thrust). */
 function accumulateAccelerations(
   bodies: Body[],
   massScale: number,

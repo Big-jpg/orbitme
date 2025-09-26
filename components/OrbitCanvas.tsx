@@ -2,20 +2,22 @@
 import { Canvas, useFrame } from "@react-three/fiber";
 import { OrbitControls, Line } from "@react-three/drei";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Body, makeCircularBodies, ensureProbe } from "~/lib/bodies";
+import { Body, makeCircularBodies, ensurePayloadGEO } from "~/lib/bodies";
 import { useSim } from "~/components/Controls";
 import {
   seedCircularVelocities,
   zeroSystemMomentum,
   stepLeapfrog,
   stepRK4,
-  type ExtraAccel
+  type ExtraAccel,
+  M_PER_S_TO_AU_PER_DAY,
 } from "~/lib/physics";
 
 function Scene() {
   const {
     running, dt, timeScale, integrator, trails, massScale, velScale,
-    brachistochrone, thrustAccel, resetSignal
+    payloadEnabled, dvMps, thrustPulse, payloadReset, resetSignal,
+    trailLen,
   } = useSim();
 
   const [bodies, setBodies] = useState<Body[]>(() => {
@@ -25,18 +27,11 @@ function Scene() {
     return init;
   });
 
-  // Brachistochrone autopilot state
-  const probeState = useRef<{ phase: "accel" | "decel"; halfDist: number; armed: boolean }>({
-    phase: "accel",
-    halfDist: 0,
-    armed: false
-  });
-
-  // trails
-  const maxTrail = 4000;
+  // Each body’s Float32 buffer and current write index
   const trailsRef = useRef<Map<string, Float32Array>>(new Map());
   const trailIdxRef = useRef<Map<string, number>>(new Map());
 
+  // Reset whole system
   useEffect(() => {
     const reset = makeCircularBodies();
     seedCircularVelocities(reset, "sun", false);
@@ -44,8 +39,65 @@ function Scene() {
     setBodies(reset);
     trailsRef.current = new Map();
     trailIdxRef.current = new Map();
-    probeState.current = { phase: "accel", halfDist: 0, armed: false };
   }, [resetSignal]);
+
+  // Spawn/reset payload into GEO
+  useEffect(() => {
+    if (!payloadEnabled) return;
+    setBodies(prev => {
+      const next = prev.map(b => ({
+        ...b,
+        position: [...b.position] as [number, number, number],
+        velocity: [...b.velocity] as [number, number, number]
+      }));
+      ensurePayloadGEO(next);
+      return next;
+    });
+  }, [payloadEnabled, payloadReset]);
+
+  // One-shot Δv (instant burn) on payload (prograde)
+  useEffect(() => {
+    if (!payloadEnabled) return;
+    setBodies(prev => {
+      const next = prev.map(b => ({
+        ...b,
+        position: [...b.position] as [number, number, number],
+        velocity: [...b.velocity] as [number, number, number]
+      }));
+
+      const i = next.findIndex(b => b.id === "payload");
+      if (i >= 0) {
+        const dv = dvMps * M_PER_S_TO_AU_PER_DAY;
+        const v = next[i].velocity;
+        const vmag = Math.hypot(v[0], v[1], v[2]) || 1;
+        const u = [v[0] / vmag, v[1] / vmag, v[2] / vmag] as [number, number, number];
+        next[i].velocity = [v[0] + u[0] * dv, v[1] + u[1] * dv, v[2] + u[2] * dv];
+      } else {
+        ensurePayloadGEO(next);
+      }
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [thrustPulse]);
+
+  // If a slider changed, reallocate a body’s trail buffer to the new length.
+  useEffect(() => {
+    if (!trails) return;
+    for (const b of bodies) {
+      const desired = Math.max(0, Math.floor(trailLen[b.id] ?? 2000));
+      const existing = trailsRef.current.get(b.id);
+      const have = existing ? existing.length / 3 : 0;
+      if (have !== desired) {
+        if (desired === 0) {
+          trailsRef.current.delete(b.id);
+          trailIdxRef.current.delete(b.id);
+        } else {
+          trailsRef.current.set(b.id, new Float32Array(desired * 3));
+          trailIdxRef.current.set(b.id, 0);
+        }
+      }
+    }
+  }, [trailLen, bodies, trails]);
 
   useFrame(() => {
     if (!running) return;
@@ -56,58 +108,8 @@ function Scene() {
       velocity: [...b.velocity] as [number, number, number]
     }));
 
-    // Build sparse per-body thrust (if any)
-    let extra: ExtraAccel = undefined;
+    const extra: ExtraAccel = undefined;
 
-    if (brachistochrone) {
-      const earthIndex = next.findIndex(b => b.id === "earth");
-      const marsIndex  = next.findIndex(b => b.id === "mars");
-      if (earthIndex >= 0 && marsIndex >= 0) {
-        if (!probeState.current.armed) {
-          ensureProbe(next, next[earthIndex].position, next[earthIndex].velocity);
-          const d0 = Math.hypot(
-            next[marsIndex].position[0] - next[earthIndex].position[0],
-            next[marsIndex].position[1] - next[earthIndex].position[1],
-            next[marsIndex].position[2] - next[earthIndex].position[2]
-          );
-          probeState.current = { phase: "accel", halfDist: d0 * 0.5, armed: true };
-        }
-        const probeIndex = next.findIndex(b => b.id === "probe");
-        if (probeIndex >= 0) {
-          const p = next[probeIndex];
-          const m = next[marsIndex];
-
-          const dx = m.position[0] - p.position[0];
-          const dy = m.position[1] - p.position[1];
-          const dz = m.position[2] - p.position[2];
-          const dist = Math.hypot(dx, dy, dz) || 1;
-
-          if (probeState.current.phase === "accel" && dist <= probeState.current.halfDist) {
-            probeState.current.phase = "decel";
-          }
-
-          let ax = 0, ay = 0, az = 0;
-          if (probeState.current.phase === "accel") {
-            // Thrust toward Mars
-            ax = (dx / dist) * thrustAccel;
-            ay = (dy / dist) * thrustAccel;
-            az = (dz / dist) * thrustAccel;
-          } else {
-            // Retro-thrust to brake
-            const vmag = Math.hypot(p.velocity[0], p.velocity[1], p.velocity[2]) || 1;
-            ax = -(p.velocity[0] / vmag) * thrustAccel;
-            ay = -(p.velocity[1] / vmag) * thrustAccel;
-            az = -(p.velocity[2] / vmag) * thrustAccel;
-          }
-
-          const arr: ( [number, number, number] | undefined )[] = new Array(next.length);
-          arr[probeIndex] = [ax, ay, az];
-          extra = arr;
-        }
-      }
-    }
-
-    // Step physics
     const safeDt = Math.min(dt, 0.25);
     const safeScale = Math.min(timeScale, 100);
 
@@ -119,19 +121,25 @@ function Scene() {
 
     setBodies(next);
 
-    // Update trails (including probe)
     if (trails) {
       for (const b of next) {
-        if (!trailsRef.current.has(b.id)) {
-          trailsRef.current.set(b.id, new Float32Array(maxTrail * 3));
-          trailIdxRef.current.set(b.id, 0);
+        const desired = Math.max(0, Math.floor(trailLen[b.id] ?? 2000));
+        if (desired === 0) continue;
+
+        let arr = trailsRef.current.get(b.id);
+        let idx = trailIdxRef.current.get(b.id) ?? 0;
+
+        // Allocate on demand or when length mismatched (belt & suspenders)
+        if (!arr || arr.length !== desired * 3) {
+          arr = new Float32Array(desired * 3);
+          trailsRef.current.set(b.id, arr);
+          idx = 0;
         }
-        const arr = trailsRef.current.get(b.id)!;
-        let idx = trailIdxRef.current.get(b.id)!;
+
         arr[idx * 3 + 0] = b.position[0];
         arr[idx * 3 + 1] = b.position[1];
         arr[idx * 3 + 2] = b.position[2];
-        idx = (idx + 1) % maxTrail;
+        idx = desired > 0 ? (idx + 1) % desired : 0;
         trailIdxRef.current.set(b.id, idx);
       }
     }
@@ -147,7 +155,7 @@ function Scene() {
         <mesh key={b.id} position={b.position as any}>
           <sphereGeometry args={[b.radius, 24, 24]} />
           <meshStandardMaterial
-            color={b.id === "probe" ? "#ff2d55" : b.color}
+            color={b.id === "payload" ? "#ff2d55" : b.color}
             emissive={b.id === "sun" ? b.color : undefined}
           />
         </mesh>
@@ -155,12 +163,18 @@ function Scene() {
 
       {/* Trails */}
       {useMemo(() => bodies.map(b => {
-        if (!trails || !trailsRef.current.has(b.id)) return null;
-        const arr = trailsRef.current.get(b.id)!;
-        const idx = trailIdxRef.current.get(b.id)!;
+        const arr = trailsRef.current.get(b.id);
+        if (!trails || !arr) return null;
+
+        // Rebuild ordered vertices so the line is continuous
+        const desired = Math.max(0, Math.floor(trailLen[b.id] ?? 2000));
+        if (desired === 0) return null;
+
+        const idx = trailIdxRef.current.get(b.id) ?? 0;
         const ordered = new Float32Array(arr.length);
         ordered.set(arr.slice(idx * 3));
         ordered.set(arr.slice(0, idx * 3), arr.length - idx * 3);
+
         const pts: [number, number, number][] = [];
         for (let i = 0; i < ordered.length; i += 3) {
           pts.push([ordered[i], ordered[i + 1], ordered[i + 2]]);
@@ -169,11 +183,11 @@ function Scene() {
           <Line
             key={`trail-${b.id}`}
             points={pts}
-            linewidth={b.id === "probe" ? 2 : 1}
-            color={b.id === "probe" ? "#ff2d55" : b.color}
+            linewidth={b.id === "payload" ? 2 : 1}
+            color={b.id === "payload" ? "#ff2d55" : b.color}
           />
         );
-      }), [bodies, trails, resetSignal])}
+      }), [bodies, trails, trailLen, resetSignal, payloadReset, thrustPulse])}
 
       <ambientLight intensity={0.6} />
       <pointLight position={[0,0,0]} intensity={2} />

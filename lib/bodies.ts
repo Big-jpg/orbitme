@@ -54,21 +54,41 @@ export function makeCircularBodies(): Body[] {
   return bodies;
 }
 
-/** Create/replace a zero-mass probe (test particle). */
-export function ensureProbe(
+/** Create/replace a zero-mass payload (test particle). */
+export function ensurePayload(
   bodies: Body[],
   startAt?: [number, number, number],
   v0?: [number, number, number]
 ) {
-  const i = bodies.findIndex(b => b.id === "probe");
-  const probe: Body = {
-    id: "probe",
-    name: "Probe",
+  const i = bodies.findIndex(b => b.id === "payload");
+  const payload: Body = {
+    id: "payload",
+    name: "Payload",
     color: "#ff2d55",
-    mass: 0, // test particle; exerts no gravity on others
+    mass: 0, // test particle; no gravity on others
     position: startAt ? [...startAt] as [number,number,number] : [1,0,0],
     velocity: v0 ? [...v0] as [number,number,number] : [0,0,0],
-    radius: 0.005
+    radius: 0.006
   };
-  if (i >= 0) bodies[i] = probe; else bodies.push(probe);
+  if (i >= 0) bodies[i] = payload; else bodies.push(payload);
+}
+
+/** Spawn/respawn payload into circular GEO around Earth (prograde, XY plane). */
+export function ensurePayloadGEO(bodies: Body[]) {
+  const earth = bodies.find(b => b.id === "earth");
+  if (!earth) return;
+  const R_GEO_AU = 42164_000 / 1.495978707e11; // ≈ 2.818e-4 AU
+  // Place +Y from Earth; tangential prograde along +X (relative frame)
+  const pos: [number, number, number] = [
+    earth.position[0] + 0,
+    earth.position[1] + R_GEO_AU,
+    earth.position[2] + 0,
+  ];
+  const vCirc = Math.sqrt(G * earth.mass / R_GEO_AU); // AU/day
+  const vel: [number, number, number] = [
+    earth.velocity[0] + vCirc,
+    earth.velocity[1] + 0,
+    earth.velocity[2] + 0,
+  ];
+  ensurePayload(bodies, pos, vel);
 }
