@@ -1,51 +1,55 @@
 import { Canvas, useFrame } from "@react-three/fiber";
 import { OrbitControls, Line } from "@react-three/drei";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { initialBodies, Body } from "~/lib/bodies";
+import { Body, makeCircularBodies } from "~/lib/bodies";
 import { useSim } from "~/components/Controls";
-import { stepSymplecticEuler, stepRK4, seedCircularVelocities } from "~/lib/physics";
-import * as THREE from "three";
+import { seedCircularVelocities, zeroSystemMomentum, stepLeapfrog, stepRK4 } from "~/lib/physics";
+
 
 function Scene() {
   const { running, dt, timeScale, integrator, trails, massScale, velScale, resetSignal } = useSim();
-  const [bodies, setBodies] = useState<Body[]>(() => initialBodies.map(b => ({ ...b, position: [...b.position], velocity: [...b.velocity] })));
+
+  const [bodies, setBodies] = useState<Body[]>(() => {
+    const init = makeCircularBodies();
+    seedCircularVelocities(init, "sun", false);
+    zeroSystemMomentum(init);
+    return init;
+  });
 
   // trails
-  const maxTrail = 2000;
+  const maxTrail = 250;
   const trailsRef = useRef<Map<string, Float32Array>>(new Map());
   const trailIdxRef = useRef<Map<string, number>>(new Map());
 
-  useEffect(() => {
-    // Reset bodies & trails
-    setBodies(initialBodies.map(b => ({
-      ...b,
-      position: [...b.position] as [number, number, number],
-      velocity: [...b.velocity] as [number, number, number]
-    })));
-
-    const reset = initialBodies.map(b => ({
-      ...b,
-      position: [...b.position] as [number, number, number],
-      velocity: [...b.velocity] as [number, number, number]
-    }));
-    // If any body (except the Sun) starts with ~zero speed, seed a circular velocity.
-    const needsSeed = reset.some(b => b.id !== "sun" && Math.hypot(b.velocity[0], b.velocity[1], b.velocity[2]) < 1e-6);
-    if (needsSeed) seedCircularVelocities(reset, "sun", /*clockwise*/ false);
+   useEffect(() => {
+    const reset = makeCircularBodies();
+    seedCircularVelocities(reset, "sun", false);
+    zeroSystemMomentum(reset);
     setBodies(reset);
     trailsRef.current = new Map();
     trailIdxRef.current = new Map();
   }, [resetSignal]);
 
-  useFrame(() => {
+
+useFrame(() => {
     if (!running) return;
 
     // Step physics
-    const next = bodies.map(b => ({ ...b, position: [...b.position] as any, velocity: [...b.velocity] as any }));
+    const next = bodies.map(b => ({
+      ...b,
+      position: [...b.position] as [number, number, number],
+      velocity: [...b.velocity] as [number, number, number]
+    }));
+ // Keep h modest; circular demo is happiest at these
+    const safeDt = Math.min(dt, 0.25);
+    const safeScale = Math.min(timeScale, 50);
+
     if (integrator === "rk4") {
-      stepRK4(next, dt, timeScale, massScale, velScale);
+      stepRK4(next, safeDt, safeScale, massScale, velScale, /*centralSunOnly*/ true, 0);
     } else {
-      stepSymplecticEuler(next, dt, timeScale, massScale, velScale);
+      stepLeapfrog(next, safeDt, safeScale, massScale, velScale, /*centralSunOnly*/ true, 0);
     }
+
     setBodies(next);
 
     // Update trails
@@ -57,9 +61,9 @@ function Scene() {
         }
         const arr = trailsRef.current.get(b.id)!;
         let idx = trailIdxRef.current.get(b.id)!;
-        arr[idx * 3 + 0] = b.position[0];
-        arr[idx * 3 + 1] = b.position[1];
-        arr[idx * 3 + 2] = b.position[2];
+        arr[idx*3+0] = b.position[0];
+        arr[idx*3+1] = b.position[1];
+        arr[idx*3+2] = b.position[2];
         idx = (idx + 1) % maxTrail;
         trailIdxRef.current.set(b.id, idx);
       }
@@ -68,12 +72,8 @@ function Scene() {
 
   return (
     <>
-      {/* Orbital plane grid (rotate XZ grid onto XY ecliptic) */}
-      <gridHelper
-        args={[80, 40, 0x333333, 0x222222]}
-        position={[0, 0, 0]}
-        rotation={[Math.PI / 2, 0, 0]}
-      />
+      <gridHelper args={[80, 40, 0x333333, 0x222222]} position={[0,0,0]} rotation={[Math.PI/2,0,0]} />
+
 
       {/* Bodies */}
       {bodies.map(b => (
