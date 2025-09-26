@@ -12,19 +12,12 @@ type Store = {
   massScale: number;
   velScale: number;
 
-  payloadEnabled: boolean;
-  dvMps: number;
-  thrustPulse: number;
-  payloadReset: number;
-
   trailLen: TrailLen;
 
   resetSignal: number;
 
   set: (p: Partial<Store>) => void;
   pokeReset: () => void;
-  fireThrust: () => void;
-  resetPayload: () => void;
   setTrailLen: (id: string, len: number) => void;
 };
 
@@ -38,7 +31,7 @@ const DEFAULT_TRAIL_LEN: TrailLen = {
   saturn: 3000,
   uranus: 3000,
   neptune: 3000,
-  payload: 2500,
+  // payload removed
 };
 
 export const useSim = create<Store>((set) => ({
@@ -50,19 +43,12 @@ export const useSim = create<Store>((set) => ({
   massScale: 1,
   velScale: 1,
 
-  payloadEnabled: true,
-  dvMps: 250,
-  thrustPulse: 0,
-  payloadReset: 0,
-
   trailLen: { ...DEFAULT_TRAIL_LEN },
 
   resetSignal: 0,
 
   set: (p) => set(p),
   pokeReset: () => set((s) => ({ resetSignal: s.resetSignal + 1 })),
-  fireThrust: () => set((s) => ({ thrustPulse: s.thrustPulse + 1 })),
-  resetPayload: () => set((s) => ({ payloadReset: s.payloadReset + 1 })),
   setTrailLen: (id, len) =>
     set((s) => ({ trailLen: { ...s.trailLen, [id]: Math.max(0, Math.floor(len)) } })),
 }));
@@ -103,8 +89,7 @@ const checkbox = { marginLeft: 6 } as const;
 export default function Controls() {
   const {
     running, dt, timeScale, integrator, trails, massScale, velScale,
-    payloadEnabled, dvMps, set, pokeReset, fireThrust, resetPayload,
-    trailLen, setTrailLen
+    set, pokeReset, trailLen, setTrailLen
   } = useSim();
 
   return (
@@ -178,34 +163,6 @@ export default function Controls() {
         </label>
       </fieldset>
 
-      {/* PAYLOAD */}
-      <fieldset style={section}>
-        <legend style={legend}>Payload</legend>
-
-        <label style={{ ...row, display: "flex", justifyContent: "space-between" }}>
-          <span style={label}>Enable payload</span>
-          <input
-            type="checkbox" checked={payloadEnabled}
-            onChange={e => set({ payloadEnabled: e.target.checked })}
-            style={checkbox}
-          />
-        </label>
-
-        <div style={buttonRow}>
-          <button style={btn} onClick={resetPayload}>Reset to GEO</button>
-          <button style={btn} onClick={fireThrust}>Apply Thrust (Δv)</button>
-        </div>
-
-        <label style={row}>
-          <span style={label}>Δv (m/s): <span style={value}>{dvMps.toFixed(0)}</span></span>
-          <input
-            type="range" min={10} max={4000} step={10}
-            value={dvMps} onChange={e => set({ dvMps: Number(e.target.value) })}
-            style={sliderStyle}
-          />
-        </label>
-      </fieldset>
-
       {/* TRAILS (compact two-column grid) */}
       <fieldset style={{ ...section, paddingBottom: 6 }}>
         <legend style={legend}>Trails (length)</legend>
@@ -219,7 +176,7 @@ export default function Controls() {
           {([
             ["sun","Sun"],["mercury","Mercury"],["venus","Venus"],["earth","Earth"],
             ["mars","Mars"],["jupiter","Jupiter"],["saturn","Saturn"],
-            ["uranus","Uranus"],["neptune","Neptune"],["payload","Payload"],
+            ["uranus","Uranus"],["neptune","Neptune"],
           ] as const).map(([id, name]) => (
             <label key={id} style={row}>
               <span style={label}>{name}: <span style={value}>{trailLen[id]}</span></span>
