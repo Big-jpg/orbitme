@@ -3,7 +3,7 @@ import { OrbitControls, Line } from "@react-three/drei";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { initialBodies, Body } from "~/lib/bodies";
 import { useSim } from "~/components/Controls";
-import { stepSymplecticEuler, stepRK4 } from "~/lib/physics";
+import { stepSymplecticEuler, stepRK4, seedCircularVelocities } from "~/lib/physics";
 import * as THREE from "three";
 
 function Scene() {
@@ -17,7 +17,21 @@ function Scene() {
 
   useEffect(() => {
     // Reset bodies & trails
-    setBodies(initialBodies.map(b => ({ ...b, position: [...b.position], velocity: [...b.velocity] })));
+    setBodies(initialBodies.map(b => ({
+      ...b,
+      position: [...b.position] as [number, number, number],
+      velocity: [...b.velocity] as [number, number, number]
+    })));
+
+    const reset = initialBodies.map(b => ({
+      ...b,
+      position: [...b.position] as [number, number, number],
+      velocity: [...b.velocity] as [number, number, number]
+    }));
+    // If any body (except the Sun) starts with ~zero speed, seed a circular velocity.
+    const needsSeed = reset.some(b => b.id !== "sun" && Math.hypot(b.velocity[0], b.velocity[1], b.velocity[2]) < 1e-6);
+    if (needsSeed) seedCircularVelocities(reset, "sun", /*clockwise*/ false);
+    setBodies(reset);
     trailsRef.current = new Map();
     trailIdxRef.current = new Map();
   }, [resetSignal]);
@@ -43,9 +57,9 @@ function Scene() {
         }
         const arr = trailsRef.current.get(b.id)!;
         let idx = trailIdxRef.current.get(b.id)!;
-        arr[idx*3+0] = b.position[0];
-        arr[idx*3+1] = b.position[1];
-        arr[idx*3+2] = b.position[2];
+        arr[idx * 3 + 0] = b.position[0];
+        arr[idx * 3 + 1] = b.position[1];
+        arr[idx * 3 + 2] = b.position[2];
         idx = (idx + 1) % maxTrail;
         trailIdxRef.current.set(b.id, idx);
       }
@@ -54,8 +68,12 @@ function Scene() {
 
   return (
     <>
-      {/* Orbital plane grid */}
-      <gridHelper args={[80, 40, 0x333333, 0x222222]} position={[0,0,0]} />
+      {/* Orbital plane grid (rotate XZ grid onto XY ecliptic) */}
+      <gridHelper
+        args={[80, 40, 0x333333, 0x222222]}
+        position={[0, 0, 0]}
+        rotation={[Math.PI / 2, 0, 0]}
+      />
 
       {/* Bodies */}
       {bodies.map(b => (
@@ -72,14 +90,14 @@ function Scene() {
         // Build ordered vertices starting at current index to form continuous loop
         const idx = trailIdxRef.current.get(b.id)!;
         const ordered = new Float32Array(arr.length);
-        ordered.set(arr.slice(idx*3));
-        ordered.set(arr.slice(0, idx*3), arr.length - idx*3);
+        ordered.set(arr.slice(idx * 3));
+        ordered.set(arr.slice(0, idx * 3), arr.length - idx * 3);
         const pts: [number, number, number][] = [];
-        for (let i=0; i<ordered.length; i+=3) {
-          pts.push([ordered[i], ordered[i+1], ordered[i+2]]);
+        for (let i = 0; i < ordered.length; i += 3) {
+          pts.push([ordered[i], ordered[i + 1], ordered[i + 2]]);
         }
         return <Line key={`trail-${b.id}`} points={pts} linewidth={1} color={b.color} />;
-      // eslint-disable-next-line react-hooks/exhaustive-deps
+        // eslint-disable-next-line react-hooks/exhaustive-deps
       }), [bodies, trails, resetSignal])}
 
       {/* Lighting */}
