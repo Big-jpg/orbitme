@@ -1,17 +1,17 @@
 "use client";
 import * as THREE from "three";
+import PlanetMesh from "~/components/PlanetMesh";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, Line, Stars, Billboard, Text } from "@react-three/drei";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, Fragment } from "react";
 import { Body, makeCircularBodies /*, ensurePayloadGEO */ } from "~/lib/bodies";
-import { useSim } from "~/components/Controls";
+import { useSim } from "~/state/sim";
 import {
   seedCircularVelocities,
   zeroSystemMomentum,
   stepLeapfrog,
   stepRK4,
   type ExtraAccel,
-  M_PER_S_TO_AU_PER_DAY,
 } from "~/lib/physics";
 
 /** Camera-locked starfield (true 3D background). */
@@ -21,7 +21,8 @@ function StarBackground() {
   const { camera } = useThree();
 
   useFrame(() => {
-    if (groupRef.current) groupRef.current.position.copy((camera as THREE.PerspectiveCamera).position);
+    if (groupRef.current)
+      groupRef.current.position.copy((camera as THREE.PerspectiveCamera).position);
   });
 
   useEffect(() => {
@@ -30,8 +31,9 @@ function StarBackground() {
     s.renderOrder = -1;
     const mat = s.material as THREE.PointsMaterial;
     if (mat) {
-      mat.depthWrite = false;
-      mat.depthTest = false;
+      // Let planets occlude stars (fixes "stars visible through bodies")
+      mat.depthWrite = false; // don't write to depth buffer to avoid z-fighting
+      mat.depthTest = true;   // DO test depth so stars sit "behind" bodies
       mat.needsUpdate = true;
     }
   }, []);
@@ -64,7 +66,6 @@ function initTrail(arr: Float32Array, pos: [number, number, number]) {
 function Scene() {
   const {
     running, dt, timeScale, integrator, trails, massScale, velScale,
-    // payloadEnabled, dvMps, thrustPulse, payloadReset,   // <-- payload disabled
     resetSignal, trailLen,
   } = useSim();
 
@@ -88,10 +89,6 @@ function Scene() {
     trailsRef.current = new Map();
     trailIdxRef.current = new Map();
   }, [resetSignal]);
-
-  // --- PAYLOAD LOGIC DISABLED ---
-  // useEffect(() => { /* ensurePayloadGEO(next) */ }, [payloadEnabled, payloadReset]);
-  // useEffect(() => { /* apply Δv to payload */ }, [thrustPulse]);
 
   // Reallocate trail buffers when length changes
   useEffect(() => {
@@ -159,7 +156,6 @@ function Scene() {
     }
   });
 
-  // Tunables for visual scale & labels
   const PLANET_SCALE = 8.5;
   const LABEL_Z_OFFSET = 0.20;
 
@@ -168,27 +164,22 @@ function Scene() {
       <color attach="background" args={["#020409"]} />
       <StarBackground />
 
-      {/* Bodies + labels */}
+      {/* Bodies rendered via PlanetMesh + labels */}
       {bodies.map(b => {
-        const r = b.radius * PLANET_SCALE;
+        const bodyForView = { ...b, radius: b.radius * PLANET_SCALE };
         const fontSize =
           b.id === "sun" ? 0.06 :
           b.id === "jupiter" || b.id === "saturn" ? 0.08 :
           0.06;
 
         return (
-          <group key={b.id} position={b.position as any}>
-            <mesh>
-              <sphereGeometry args={[r, 32, 32]} />
-              <meshStandardMaterial
-                color={b.color}
-                emissive={b.id === "sun" ? b.color : undefined}
-                emissiveIntensity={b.id === "sun" ? 0.9 : 0}
-                roughness={0.35}
-                metalness={0.08}
-              />
-            </mesh>
-            <Billboard position={[0, 0, LABEL_Z_OFFSET]}>
+          <Fragment key={b.id}>
+            <PlanetMesh body={bodyForView} />
+            <Billboard position={[
+              b.position[0],
+              b.position[1],
+              b.position[2] + LABEL_Z_OFFSET
+            ]}>
               <Text
                 fontSize={fontSize}
                 color={b.id === "sun" ? "#ffe9a6" : "#e5e7eb"}
@@ -200,7 +191,7 @@ function Scene() {
                 {b.name ?? b.id}
               </Text>
             </Billboard>
-          </group>
+          </Fragment>
         );
       })}
 
@@ -244,9 +235,22 @@ function Scene() {
 }
 
 export default function OrbitCanvas() {
+  // Pull camera settings and the reset pulse from the store
+  const {
+    camMinDist, camMaxDist, camZoomSpeed,
+    camAutoRotate, camAutoRotateSpeed,
+    camResetPulse,
+  } = useSim();
+
+  const controlsRef = useRef<any>(null);
+
+  // Reset camera whenever the pulse increments
+  useEffect(() => {
+    controlsRef.current?.reset?.();
+  }, [camResetPulse]);
+
   return (
     <Canvas
-      // Allow very close zoom without clipping
       camera={{ position: [0, 15, 28], near: 0.05, far: 1000 }}
       gl={{
         antialias: true,
@@ -255,13 +259,16 @@ export default function OrbitCanvas() {
       }}
     >
       <OrbitControls
+        ref={controlsRef}
         enablePan
         enableDamping
         dampingFactor={0.08}
         target={[0, 0, 0]}
-        minDistance={0.05}   // <-- zoom much closer
-        maxDistance={800}    // plenty of room to zoom out
-        zoomSpeed={0.9}
+        minDistance={camMinDist}
+        maxDistance={camMaxDist}
+        zoomSpeed={camZoomSpeed}
+        autoRotate={camAutoRotate}
+        autoRotateSpeed={camAutoRotateSpeed}
       />
       <Scene />
     </Canvas>

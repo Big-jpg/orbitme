@@ -1,58 +1,8 @@
 "use client";
-import { create } from "zustand";
 
-type TrailLen = Record<string, number>;
+import { useSim } from "~/state/sim";
 
-type Store = {
-  running: boolean;
-  dt: number;
-  timeScale: number;
-  integrator: "leapfrog" | "rk4";
-  trails: boolean;
-  massScale: number;
-  velScale: number;
-
-  trailLen: TrailLen;
-
-  resetSignal: number;
-
-  set: (p: Partial<Store>) => void;
-  pokeReset: () => void;
-  setTrailLen: (id: string, len: number) => void;
-};
-
-const DEFAULT_TRAIL_LEN: TrailLen = {
-  sun: 1200,
-  mercury: 1200,
-  venus: 1500,
-  earth: 2000,
-  mars: 2000,
-  jupiter: 3000,
-  saturn: 3000,
-  uranus: 3000,
-  neptune: 3000,
-  // payload removed
-};
-
-export const useSim = create<Store>((set) => ({
-  running: true,
-  dt: 0.25,
-  timeScale: 20,
-  integrator: "leapfrog",
-  trails: true,
-  massScale: 1,
-  velScale: 1,
-
-  trailLen: { ...DEFAULT_TRAIL_LEN },
-
-  resetSignal: 0,
-
-  set: (p) => set(p),
-  pokeReset: () => set((s) => ({ resetSignal: s.resetSignal + 1 })),
-  setTrailLen: (id, len) =>
-    set((s) => ({ trailLen: { ...s.trailLen, [id]: Math.max(0, Math.floor(len)) } })),
-}));
-
+/* ---------- UI styles ---------- */
 const row = { display: "grid", gap: 4, alignItems: "center" } as const;
 const label = { fontSize: 12, color: "#cbd5e1" } as const;
 const value = { fontVariantNumeric: "tabular-nums" } as const;
@@ -88,8 +38,12 @@ const checkbox = { marginLeft: 6 } as const;
 
 export default function Controls() {
   const {
+    // core
     running, dt, timeScale, integrator, trails, massScale, velScale,
-    set, pokeReset, trailLen, setTrailLen
+    // actions
+    set, pokeReset, trailLen, setTrailLen,
+    // camera
+    camMinDist, camMaxDist, camZoomSpeed, camAutoRotate, camAutoRotateSpeed, bumpCamReset,
   } = useSim();
 
   return (
@@ -106,19 +60,25 @@ export default function Controls() {
         </div>
 
         <label style={row}>
-          <span style={label}>Time scale: <span style={value}>{timeScale.toFixed(1)}×</span></span>
+          <span style={label}>
+            Time scale: <span style={value}>{timeScale.toFixed(1)}×</span>
+          </span>
           <input
             type="range" min={0.1} max={200} step={0.1}
-            value={timeScale} onChange={e => set({ timeScale: Number(e.target.value) })}
+            value={timeScale}
+            onChange={(e) => set({ timeScale: Number(e.target.value) })}
             style={sliderStyle}
           />
         </label>
 
         <label style={row}>
-          <span style={label}>dt (days/tick): <span style={value}>{dt.toFixed(2)}</span></span>
+          <span style={label}>
+            dt (days/tick): <span style={value}>{dt.toFixed(2)}</span>
+          </span>
           <input
             type="range" min={0.05} max={1} step={0.05}
-            value={dt} onChange={e => set({ dt: Number(e.target.value) })}
+            value={dt}
+            onChange={(e) => set({ dt: Number(e.target.value) })}
             style={sliderStyle}
           />
         </label>
@@ -127,7 +87,7 @@ export default function Controls() {
           <span style={label}>Integrator</span>
           <select
             value={integrator}
-            onChange={e => set({ integrator: e.target.value as any })}
+            onChange={(e) => set({ integrator: e.target.value as "leapfrog" | "rk4" })}
             style={select}
           >
             <option value="leapfrog">Leapfrog</option>
@@ -138,32 +98,110 @@ export default function Controls() {
         <label style={{ ...row, display: "flex", justifyContent: "space-between" }}>
           <span style={label}>Trails</span>
           <input
-            type="checkbox" checked={trails}
-            onChange={e => set({ trails: e.target.checked })}
+            type="checkbox"
+            checked={trails}
+            onChange={(e) => set({ trails: e.target.checked })}
             style={checkbox}
           />
         </label>
 
         <label style={row}>
-          <span style={label}>Mass scale: <span style={value}>{massScale.toFixed(2)}</span></span>
+          <span style={label}>
+            Mass scale: <span style={value}>{massScale.toFixed(2)}</span>
+          </span>
           <input
             type="range" min={0.1} max={5} step={0.1}
-            value={massScale} onChange={e => set({ massScale: Number(e.target.value) })}
+            value={massScale}
+            onChange={(e) => set({ massScale: Number(e.target.value) })}
             style={sliderStyle}
           />
         </label>
 
         <label style={row}>
-          <span style={label}>Velocity scale: <span style={value}>{velScale.toFixed(2)}</span></span>
+          <span style={label}>
+            Velocity scale: <span style={value}>{velScale.toFixed(2)}</span>
+          </span>
           <input
             type="range" min={0.5} max={1.5} step={0.01}
-            value={velScale} onChange={e => set({ velScale: Number(e.target.value) })}
+            value={velScale}
+            onChange={(e) => set({ velScale: Number(e.target.value) })}
             style={sliderStyle}
           />
         </label>
       </fieldset>
 
-      {/* TRAILS (compact two-column grid) */}
+      {/* CAMERA */}
+      <fieldset style={section}>
+        <legend style={legend}>Camera</legend>
+
+        <label style={row}>
+          <span style={label}>
+            Min distance: <span style={value}>{camMinDist.toFixed(2)}</span>
+          </span>
+          <input
+            type="range" min={0.01} max={5} step={0.01}
+            value={camMinDist}
+            onChange={(e) => set({ camMinDist: Number(e.target.value) })}
+            style={sliderStyle}
+          />
+        </label>
+
+        <label style={row}>
+          <span style={label}>
+            Max distance: <span style={value}>{camMaxDist.toFixed(0)}</span>
+          </span>
+          <input
+            type="range" min={50} max={5000} step={10}
+            value={camMaxDist}
+            onChange={(e) => set({ camMaxDist: Number(e.target.value) })}
+            style={sliderStyle}
+          />
+        </label>
+
+        <label style={row}>
+          <span style={label}>
+            Zoom speed: <span style={value}>{camZoomSpeed.toFixed(2)}</span>
+          </span>
+          <input
+            type="range" min={0.1} max={3} step={0.05}
+            value={camZoomSpeed}
+            onChange={(e) => set({ camZoomSpeed: Number(e.target.value) })}
+            style={sliderStyle}
+          />
+        </label>
+
+        <label style={{ ...row, display: "flex", justifyContent: "space-between" }}>
+          <span style={label}>Auto-rotate</span>
+          <input
+            type="checkbox"
+            checked={camAutoRotate}
+            onChange={(e) => set({ camAutoRotate: e.target.checked })}
+            style={checkbox}
+          />
+        </label>
+
+        <label style={{ ...row, opacity: camAutoRotate ? 1 : 0.6 }}>
+          <span style={label}>
+            Auto-rotate speed: <span style={value}>{camAutoRotateSpeed.toFixed(2)}</span>
+          </span>
+          <input
+            type="range" min={0.1} max={5} step={0.1}
+            value={camAutoRotateSpeed}
+            onChange={(e) => set({ camAutoRotateSpeed: Number(e.target.value) })}
+            disabled={!camAutoRotate}
+            style={sliderStyle}
+          />
+        </label>
+
+        <div style={buttonRow}>
+          <button style={btn} onClick={() => set({ camAutoRotate: !camAutoRotate })}>
+            {camAutoRotate ? "Disable auto-rotate" : "Enable auto-rotate"}
+          </button>
+          <button style={btn} onClick={bumpCamReset}>Reset Camera</button>
+        </div>
+      </fieldset>
+
+      {/* TRAILS */}
       <fieldset style={{ ...section, paddingBottom: 6 }}>
         <legend style={legend}>Trails (length)</legend>
         <div
@@ -174,15 +212,17 @@ export default function Controls() {
           }}
         >
           {([
-            ["sun","Sun"],["mercury","Mercury"],["venus","Venus"],["earth","Earth"],
-            ["mars","Mars"],["jupiter","Jupiter"],["saturn","Saturn"],
-            ["uranus","Uranus"],["neptune","Neptune"],
+            ["sun", "Sun"], ["mercury", "Mercury"], ["venus", "Venus"], ["earth", "Earth"],
+            ["mars", "Mars"], ["jupiter", "Jupiter"], ["saturn", "Saturn"],
+            ["uranus", "Uranus"], ["neptune", "Neptune"],
           ] as const).map(([id, name]) => (
             <label key={id} style={row}>
-              <span style={label}>{name}: <span style={value}>{trailLen[id]}</span></span>
+              <span style={label}>
+                {name}: <span style={value}>{(trailLen as any)[id]}</span>
+              </span>
               <input
                 type="range" min={0} max={10000} step={100}
-                value={trailLen[id] ?? 0}
+                value={(trailLen as any)[id] ?? 0}
                 onChange={(e) => setTrailLen(id, Number(e.target.value))}
                 style={sliderStyle}
               />
