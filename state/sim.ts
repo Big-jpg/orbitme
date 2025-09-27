@@ -25,6 +25,10 @@ type Store = {
   camAutoRotateSpeed: number;
   camResetPulse: number;
 
+  focusId: string | null;       
+  focusLerp: number;            
+  focusSnapOnSelect: boolean;   
+
   // Actions
   set: (p: Partial<Store>) => void;
   pokeReset: () => void;
@@ -36,7 +40,7 @@ export const useSim = create<Store>((set) => ({
   // --- core
   running: true,
   dt: 0.25,
-  timeScale: 25,
+  timeScale: 1,
   integrator: "leapfrog",
   trails: true,
   massScale: 1,
@@ -62,6 +66,10 @@ export const useSim = create<Store>((set) => ({
   camAutoRotate: false,
   camAutoRotateSpeed: 0.6,
   camResetPulse: 0,
+
+  focusId: null,
+  focusLerp: 0.12,
+  focusSnapOnSelect: false,
 
   // --- actions
   set: (p) => set(p),

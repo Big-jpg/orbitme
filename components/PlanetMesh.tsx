@@ -4,6 +4,7 @@ import { useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import { useTexture } from "@react-three/drei";
 import type { Body } from "~/lib/bodies";
+import { useSim } from "~/state/sim"; 
 
 type Props = {
   body: Body; // includes visual radius, color, optional texture & ring
@@ -17,6 +18,17 @@ type Props = {
  */
 export default function PlanetMesh({ body }: Props) {
   const groupRef = useRef<THREE.Group>(null);
+  const set = useSim(s => s.set);
+  const focusSnapOnSelect = useSim(s => s.focusSnapOnSelect);
+
+  const handlePick = (e: any) => {
+    e.stopPropagation();
+    set({ focusId: body.id });
+    // optional: immediate snap (skip lerp for one frame)
+    if (focusSnapOnSelect) {
+      set({ camResetPulse: Math.random() }); 
+    }
+  };
 
   // Build a texture-url object without undefined values.
   const texUrls = useMemo(() => {
@@ -72,7 +84,12 @@ export default function PlanetMesh({ body }: Props) {
   const r = body.radius;
 
   return (
-    <group ref={groupRef} position={body.position as any}>
+    <group
+      ref={groupRef}
+      name={`planet-${body.id}`}
+      position={body.position as any}
+      onPointerDown={handlePick}
+    >
       {/* OPAQUE sphere (occludes stars) */}
       <mesh>
         <sphereGeometry args={[r, 48, 48]} />

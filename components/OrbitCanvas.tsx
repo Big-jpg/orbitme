@@ -5,6 +5,7 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, Line, Stars, Billboard, Text } from "@react-three/drei";
 import { useEffect, useMemo, useRef, useState, Fragment } from "react";
 import { Body, makeCircularBodies /*, ensurePayloadGEO */ } from "~/lib/bodies";
+// import KeplerOrbit from "~/components/KeplerOrbit"; // keep if/when you render analytic orbits
 import { useSim } from "~/state/sim";
 import {
   seedCircularVelocities,
@@ -63,7 +64,7 @@ function initTrail(arr: Float32Array, pos: [number, number, number]) {
   }
 }
 
-function Scene() {
+function Scene({ controlsRef }: { controlsRef: React.MutableRefObject<any> }) {
   const {
     running, dt, timeScale, integrator, trails, massScale, velScale,
     resetSignal, trailLen,
@@ -156,6 +157,17 @@ function Scene() {
     }
   });
 
+  // Publish latest body positions to OrbitControls via the ref for O(1) lookup
+  useEffect(() => {
+    if (!controlsRef.current) return;
+    const map = new Map<string, [number, number, number]>();
+    for (const b of bodies) {
+      // store a copy to avoid accidental mutation side-effects
+      map.set(b.id, [b.position[0], b.position[1], b.position[2]]);
+    }
+    (controlsRef.current as any).__bodiesMap = map;
+  }, [bodies, controlsRef]);
+
   const PLANET_SCALE = 8.5;
   const LABEL_Z_OFFSET = 0.20;
 
@@ -199,12 +211,12 @@ function Scene() {
       {useMemo(
         () =>
           bodies.map(b => {
-            const arr = trailsRef.current.get(b.id);
+            const arr = (trailsRef.current as Map<string, Float32Array>).get(b.id);
             if (!trails || !arr) return null;
             const desired = Math.max(0, Math.floor(trailLen[b.id] ?? 2000));
             if (desired === 0) return null;
 
-            const idx = trailIdxRef.current.get(b.id) ?? 0;
+            const idx = (trailIdxRef.current as Map<string, number>).get(b.id) ?? 0;
             const ordered = new Float32Array(arr.length);
             ordered.set(arr.slice(idx * 3));
             ordered.set(arr.slice(0, idx * 3), arr.length - idx * 3);
@@ -234,14 +246,67 @@ function Scene() {
   );
 }
 
+/** Forward-only smoothing of OrbitControls.target toward the focused body (no camera.position fiddling). */
+function CameraFocusController({ controlsRef }: { controlsRef: React.MutableRefObject<any> }) {
+  const focusId = useSim(s => s.focusId);
+  const focusLerp = useSim(s => s.focusLerp ?? 0.12);
+  const maxStepPerSec = 2.5; // clamp how far the target can move per second
+
+  // internal smoothed target, starts at current controls.target on first frame
+  const smoothRef = useRef<THREE.Vector3 | null>(null);
+
+  useFrame((_, dt) => {
+    const controls = controlsRef.current;
+    if (!controls) return;
+
+    // init smooth target once to current orbit target
+    if (!smoothRef.current) {
+      smoothRef.current = controls.target.clone();
+    }
+    const smooth = smoothRef.current;
+
+    // where we want to go (focused body or origin)
+    const map = controls.__bodiesMap as Map<string, [number, number, number]> | undefined;
+    const desired = new THREE.Vector3(0, 0, 0);
+    if (focusId && map?.has(focusId)) {
+      const p = map.get(focusId)!;
+      desired.set(p[0], p[1], p[2]);
+    }
+
+    // forward-only step: clamp step length per frame to avoid overshoot/oscillation
+    let delta: THREE.Vector3;
+    if (smooth) {
+      delta = desired.clone().sub(smooth);
+      const dist = delta.length();
+      if (dist > 0) {
+        const maxStep = Math.max(0.00001, maxStepPerSec * dt);
+        const step = Math.min(dist, maxStep);
+        delta.multiplyScalar(step / dist);
+        smooth.add(delta);
+      }
+    }
+
+    // optional extra easing
+    if (focusLerp > 0 && focusLerp < 1 && smooth) {
+      // frame-rate friendly EMA; cap so it doesn't fight the clamp
+      smooth.lerp(desired, Math.min(0.5, focusLerp * dt * 60));
+    }
+
+    // only update controls.target; let OrbitControls handle the camera with damping
+    controls.target.copy(smooth);
+    controls.update();
+  });
+
+  return null;
+}
+
 export default function OrbitCanvas() {
-  // Pull camera settings and the reset pulse from the store
+  // Camera settings and reset pulse
   const {
     camMinDist, camMaxDist, camZoomSpeed,
     camAutoRotate, camAutoRotateSpeed,
     camResetPulse,
   } = useSim();
-
   const controlsRef = useRef<any>(null);
 
   // Reset camera whenever the pulse increments
@@ -257,6 +322,8 @@ export default function OrbitCanvas() {
         powerPreference: "high-performance",
         logarithmicDepthBuffer: true,
       }}
+      // Prefer viewpoint selection via UI; if you still want click-to-clear, re-enable:
+      // onPointerMissed={() => set({ focusId: null })}
     >
       <OrbitControls
         ref={controlsRef}
@@ -270,7 +337,9 @@ export default function OrbitCanvas() {
         autoRotate={camAutoRotate}
         autoRotateSpeed={camAutoRotateSpeed}
       />
-      <Scene />
+
+      <CameraFocusController controlsRef={controlsRef} />
+      <Scene controlsRef={controlsRef} />
     </Canvas>
   );
 }
